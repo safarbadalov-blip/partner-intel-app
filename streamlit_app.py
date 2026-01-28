@@ -18,7 +18,7 @@ RENDER_URL = "https://partner-intelligence-engine.onrender.com"
 
 # Setup Gemini (Using FLASH for better compatibility)
 genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 # --- THE ENGINE TOOL ---
 def call_engine():
