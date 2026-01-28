@@ -2,112 +2,64 @@ import streamlit as st
 import google.generativeai as genai
 import requests
 import pandas as pd
+import time
+from datetime import datetime, timedelta
 
 # 1. PAGE SETUP
-st.set_page_config(page_title="Forensic Partner Intel", layout="wide", page_icon="🕵️")
-st.title("🕵️ Forensic Truth Engine")
+st.set_page_config(page_title="Forensic Partner Intel", layout="wide")
+st.title("🕵️ Forensic Truth Engine: Conservative Mode")
 
-# 2. SECRETS & CONFIG
-if "GEMINI_API_KEY" not in st.secrets:
-    st.error("Missing GEMINI_API_KEY in secrets.")
-    st.stop()
-
+# 2. SECRETS
 API_KEY = st.secrets["GEMINI_API_KEY"]
 RENDER_URL = "https://partner-intelligence-engine.onrender.com"
 
-# 3. INITIALIZE SESSION STATE (Prevents losing data on refresh)
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "evidence" not in st.session_state:
-    st.session_state.evidence = None
+# 3. CONSERVATIVE RATE LIMITER (The Secret Sauce)
+if "last_request_time" not in st.session_state:
+    st.session_state.last_request_time = datetime.now() - timedelta(seconds=20)
 
-# 4. THE "CLERK" PROMPT - Zero Hallucination Protocol
-system_instruction = """
-STRICT PROTOCOL: You are a DATA CLERK. 
+def wait_for_safety():
+    """Forces a strict 15-second gap between any AI activity."""
+    time_since_last = (datetime.now() - st.session_state.last_request_time).total_seconds()
+    wait_needed = 15 - time_since_last
+    if wait_needed > 0:
+        with st.spinner(f"🛡️ Safety Throttle: Waiting {int(wait_needed)}s to prevent 429 crash..."):
+            time.sleep(wait_needed)
+    st.session_state.last_request_time = datetime.now()
 
-1. You will receive a list of quotes and verified URLs.
-2. YOU ARE FORBIDDEN from rewriting the URLs or shortening them.
-3. YOUR MISSION: Prove that partner pain exists by listing the REMAINDER of the data.
-4. If a fact is not directly supported by a 'source_url' in the tool output, DO NOT INCLUDE IT.
-5. Every link MUST be clickable and exactly as provided.
-
-PHASE 1: VERIFIED EVIDENCE TABLE
-Create a Markdown table with these columns: [Observation | Supporting Quote | Source Link].
-In the Source Link column, use the format: [View Source](URL)
-
-PHASE 2: PROSPECTING EMAIL
-Write a short, provocative email using ONLY the facts from the table above.
-"""
-
+# 4. CONFIG
 genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel('gemini-3-flash-preview', system_instruction=system_instruction)
+# We use 1.5 Flash because it has the most 'forgiving' free tier in 2026
+model = genai.GenerativeModel('gemini-1.5-flash')
 
-# 5. ENGINE TOOL DEFINITION
 def call_engine(target_company: str, portal_url: str):
-    """
-    REQUIRED: Performs a forensic search of the internet to find partner pain and 
-    tech stack information for a specific company.
-    """
-    payload = {
-        "TARGET_COMPANY_NAME": target_company, 
-        "PARTNER_PORTAL_URL": portal_url,
-        "EXECUTION_MODE": "FORENSIC_PLUS_INTERPRETATION"
-    }
+    """Forensic Search Tool"""
+    # Tool calls also count as requests, so we throttle here too
+    time.sleep(2) 
+    payload = {"TARGET_COMPANY_NAME": target_company, "PARTNER_PORTAL_URL": portal_url}
+    r = requests.post(f"{RENDER_URL}/run", json=payload, headers={"x-engine-key": API_KEY})
+    data = r.json()
+    st.session_state.evidence = data
+    return data
+
+# 5. CHAT LOGIC
+if prompt := st.chat_input("Analyze..."):
+    # STEP 1: Wait for the safety window
+    wait_for_safety()
     
-    try:
-        r = requests.post(
-            f"{RENDER_URL}/run", 
-            json=payload, 
-            headers={"x-engine-key": API_KEY},
-            timeout=180
-        )
-        if r.status_code == 200:
-            data = r.json()
-            # Store evidence for the fail-safe table
-            st.session_state.evidence = data
-            return data
-        return {"error": f"Backend failed with status {r.status_code}"}
-    except Exception as e:
-        return {"error": str(e)}
-
-# 6. DISPLAY CHAT HISTORY
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-# 7. MAIN LOGIC
-if prompt := st.chat_input("Analyze Lenovo at https://partnerexp.lenovo.com/"):
-    # Add user message to history
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
     with st.chat_message("assistant"):
-        with st.status("🔍 Searching web for verified evidence...", expanded=True):
+        try:
             chat = model.start_chat(enable_automatic_function_calling=True)
+            # STEP 2: Execute
             response = chat.send_message(prompt, tools=[call_engine])
-            full_response = response.text
-        
-        st.markdown(full_response)
-        st.session_state.messages.append({"role": "assistant", "content": full_response})
+            st.markdown(response.text)
+        except Exception as e:
+            if "429" in str(e):
+                st.error("🛑 Daily Quota Exhausted. Google has cut off free access until Midnight PT.")
+            else:
+                st.error(f"Error: {e}")
 
-# 8. THE FAIL-SAFE TABLE (The Truth Locker)
-if st.session_state.evidence:
+# 6. FAIL-SAFE DATA TABLE (Always shows if data was fetched)
+if "evidence" in st.session_state and st.session_state.evidence:
     st.divider()
-    st.subheader("📂 Verification Locker (Direct Scraper Output)")
-    st.info("The links below come directly from the scraper, bypassing the AI's creative summary.")
-    
-    quotes_data = st.session_state.evidence.get('QUOTES_TABLE', [])
-    if quotes_data:
-        df = pd.DataFrame(quotes_data)
-        st.dataframe(
-            df, 
-            column_config={
-                "source_url": st.column_config.LinkColumn("Verified Source Link"),
-                "quote": st.column_config.TextColumn("Extracted Quote", width="large")
-            },
-            hide_index=True,
-            use_container_width=True
-        )
-    else:
-        st.warning("No quotes were found for this specific query.")
+    st.subheader("📂 Raw Verified Evidence")
+    st.dataframe(pd.DataFrame(st.session_state.evidence.get('QUOTES_TABLE', [])))
