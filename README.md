@@ -1,0 +1,1 @@
+# partner-intel-app
